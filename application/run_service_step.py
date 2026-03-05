@@ -11,7 +11,9 @@ from infrastructure.run_repo_sqlite import RunRepositorySQLite
 from domain.overrides import apply_overrides
 from domain.expand import expand_recipe
 import traceback
+import logging
 
+log = logging.getLogger(__name__)
 
 class RunServiceStep:
     def __init__(self, run_repo: RunRepositorySQLite):
@@ -85,7 +87,7 @@ class RunServiceStep:
                     on_progress(count, verdict)
 
             return "DONE"
-        except Exception as e:
-            
-            traceback.print_exc()
+        except Exception:
+                
+            log.exception("Run failed")            
             raise

@@ -6,7 +6,7 @@
   "bands": {
     "2.4G": {
         "standards": ["802.11b", "802.11g", "802.11n", "802.11ax"],
-        "tests_supported": ["PSD", "OBW", "SP", "TXP"],
+      "tests_supported": ["PSD", "OBW", "SP", "RX"],
         "channel_groups": {
           "ISM": {
             "channels": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
@@ -17,7 +17,7 @@
       },
     "5G": {
       "standards": ["802.11a", "802.11n", "802.11ac", "802.11ax"],
-      "tests_supported": ["PSD", "OBW", "SP", "TXP", "DFS"],
+      "tests_supported": ["PSD", "OBW", "SP", "RX"],
       "channel_groups": {
         "UNII-1": {
           "channels": [36, 40, 44, 48],
@@ -43,7 +43,7 @@
     },
     "6G": {
       "standards": ["802.11ax", "802.11be"],
-      "tests_supported": ["PSD", "OBW", "SP", "TXP"],
+      "tests_supported": ["PSD", "OBW", "SP", "RX"],
       "device_classes": ["LPI", "VLP"],
       "channel_groups": {
         "UNII-5": {

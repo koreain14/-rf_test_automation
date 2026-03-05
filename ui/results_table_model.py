@@ -50,7 +50,7 @@ class ResultsTableModel(QAbstractTableModel):
             if col == 8: return r.get("test_key", "")
         return None
     
-    def get_row(self, row: int):
+    def get_row(self, row: int) -> dict:
         if 0 <= row < len(self._rows):
             return self._rows[row]
         return None

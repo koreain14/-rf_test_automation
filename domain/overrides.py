@@ -70,3 +70,49 @@ def apply_overrides(cases: Iterable[TestCase], overrides: List[OverrideRule]) ->
                     cur = _apply_set_values(cur, o.set_values)
         if not skip:
             yield cur
+
+def apply_overrides_mark_disabled(
+    cases: Iterable[TestCase],
+    overrides: List[OverrideRule],
+) -> Iterator[TestCase]:
+    """
+    apply_overrides()의 확장 버전.
+
+    - action == 'skip'에 매칭되는 케이스를 *제거하지 않고*,
+      tags['_disabled']=True 로 표시한 뒤 그대로 yield 합니다.
+    - UI에서 'Show Disabled' 옵션을 켰을 때 사용합니다.
+
+    주의:
+    - skip이 매칭되면 일반적으로 해당 케이스는 실행하면 안 되므로,
+      set override는 적용하지 않고 disabled 마킹만 합니다(단순/명확).
+    """
+    active = [o for o in overrides if o.enabled]
+    active.sort(key=lambda o: o.priority)
+
+    for c in cases:
+        disabled = False
+        cur = c
+        for o in active:
+            if _match_case(cur, o.match):
+                if o.action == "skip":
+                    disabled = True
+                    break
+                if o.action == "set":
+                    cur = _apply_set_values(cur, o.set_values)
+
+        if disabled:
+            tags = dict(cur.tags)
+            tags["_disabled"] = True
+            cur = TestCase(
+                test_type=cur.test_type,
+                band=cur.band,
+                standard=cur.standard,
+                channel=cur.channel,
+                center_freq_mhz=cur.center_freq_mhz,
+                bw_mhz=cur.bw_mhz,
+                instrument=cur.instrument,
+                tags=tags,
+                key=cur.key,
+            )
+
+        yield cur

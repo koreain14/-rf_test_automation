@@ -79,7 +79,12 @@ def build_recipe(ruleset: RuleSet, preset: Preset) -> Recipe:
 
 
 def expand_recipe(ruleset: RuleSet, recipe: Recipe) -> Iterable[TestCase]:
-    band_info = ruleset.bands[recipe.band]
+    band_key = recipe.band
+    if band_key not in ruleset.bands:
+        raise ValueError(
+            f"Band '{band_key}' is not defined in RuleSet bands. Available: {list(ruleset.bands.keys())}"
+        )
+    band_info = ruleset.bands[band_key]
 
     pol = recipe.channel_policy
     policy = pol.get("policy")

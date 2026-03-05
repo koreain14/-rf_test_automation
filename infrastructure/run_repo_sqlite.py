@@ -97,7 +97,7 @@ class RunRepositorySQLite:
 
         if status and status != "ALL":
             cur.execute("""
-            SELECT status, test_type, band, standard, channel, bw_mhz, margin_db, test_key, tags_json
+            SELECT result_id, status, test_type, band, standard, channel, bw_mhz, margin_db, test_key, tags_json
             FROM results
             WHERE project_id = ? AND run_id = ? AND status = ?
             ORDER BY created_at ASC
@@ -105,7 +105,7 @@ class RunRepositorySQLite:
             """, (project_id, run_id, status, int(limit)))
         else:
             cur.execute("""
-            SELECT status, test_type, band, standard, channel, bw_mhz, margin_db, test_key, tags_json
+            SELECT result_id, status, test_type, band, standard, channel, bw_mhz, margin_db, test_key, tags_json
             FROM results
             WHERE project_id = ? AND run_id = ?
             ORDER BY created_at ASC

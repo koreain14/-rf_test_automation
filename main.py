@@ -1,4 +1,4 @@
-import sys
+import sys, logging, traceback
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
@@ -12,7 +12,26 @@ from application.run_service import RunService
 from application.preset_seeder import seed_presets_from_folder
 from application.run_service_step import RunServiceStep
 
+log = logging.getLogger("global")
 
+def excepthook(exctype, value, tb):
+    msg = "".join(traceback.format_exception(exctype, value, tb))
+    log.error("Uncaught exception:\n%s", msg)
+    # 콘솔에도 출력
+    sys.__excepthook__(exctype, value, tb)
+
+
+def setup_logging():
+    Path("logs").mkdir(exist_ok=True)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler("logs/app.log", encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+    )
 
 def main():
     init_db()

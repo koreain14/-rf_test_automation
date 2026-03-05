@@ -170,11 +170,29 @@ class PlanService:
 
     # ---------- Recipe/Cases ----------
     def build_recipe_from_preset(self, preset_id: str) -> Tuple[RuleSet, Preset, Recipe, List[OverrideRule]]:
-        self.validate_preset_against_ruleset(preset, ruleset)
+        """
+        preset_id로부터 (ruleset, preset, recipe, overrides)를 구성합니다.
+
+        ⚠️ 주의:
+        - validate는 preset/ruleset을 모두 로드한 이후에 호출해야 합니다.
+        - 이 함수의 반환값은 UI의 PlanContext에 그대로 들어가므로,
+          여기서 실패하면 Add Plan에서 에러가 발생합니다.
+        """
+        # 1) preset 로드
         preset = self.load_preset_obj(preset_id)
+
+        # 2) ruleset 로드 (preset이 어떤 규격을 참조하는지 기반)
         ruleset = self.load_ruleset(preset.ruleset_id)
+
+        # 3) preset ↔ ruleset 정합성 검증
+        self.validate_preset_against_ruleset(preset, ruleset)
+
+        # 4) recipe 생성(=selection을 실제 케이스 생성 규칙으로 변환)
         recipe = build_recipe(ruleset, preset)
+
+        # 5) overrides 로드(=UI에서 만든 예외/skip/파라미터 변경 규칙)
         overrides = self.load_override_objs(preset_id)
+
         return ruleset, preset, recipe, overrides
 
     def iter_cases(
@@ -183,9 +201,16 @@ class PlanService:
         recipe: Recipe,
         overrides: List[OverrideRule],
         filter_: Optional[Dict[str, Any]] = None,
+        show_disabled: bool = False,
     ):
         cases = expand_recipe(ruleset, recipe)
-        cases = apply_overrides(cases, overrides)
+        # show_disabled=True이면 skip override에 의해 제거되는 케이스도 화면에 표시하기 위해
+        # skip 대신 tags['_disabled']=True로 마킹하여 그대로 반환합니다.
+        if show_disabled:
+            from domain.overrides import apply_overrides_mark_disabled
+            cases = apply_overrides_mark_disabled(cases, overrides)
+        else:
+            cases = apply_overrides(cases, overrides)
 
         if not filter_:
             yield from cases
@@ -208,13 +233,14 @@ class PlanService:
         filter_: Optional[Dict[str, Any]],
         offset: int,
         limit: int,
+        show_disabled: bool = False,
     ) -> List[TestCase]:
         """
         MVP용 단순 페이징: iterator를 offset+limit까지 소비.
         (나중에 대규모 최적화는 별도 캐시/인덱싱으로 개선)
         """
         out: List[TestCase] = []
-        it = self.iter_cases(ruleset, recipe, overrides, filter_)
+        it = self.iter_cases(ruleset, recipe, overrides, filter_, show_disabled=show_disabled)
         i = 0
         for c in it:
             if i >= offset and len(out) < limit:
@@ -296,6 +322,91 @@ class PlanService:
             enabled=True
         )
         
+    
+    # ---------- Scenario Plan enable/disable ----------
+    def disable_selected_cases(
+        self,
+        project_id: str,
+        preset_id: str,
+        cases: List[TestCase],
+        priority: int = 100,
+    ) -> List[str]:
+        """
+        선택된 케이스를 '비활성화(Disable)' 합니다.
+
+        구현 방식(현재 MVP):
+        - overrides 테이블에 action='skip' 규칙을 추가하여 해당 케이스가 expand 결과에서 제거되도록 함.
+        - UI에서는 기본적으로 제거된 케이스는 보이지 않으며,
+          'Show Disabled' 옵션을 켜면 tags['_disabled']=True로 표시된 상태로 다시 볼 수 있음.
+
+        반환: 생성된 override_id 목록
+        """
+        if not cases:
+            return []
+
+        ids: List[str] = []
+        # 가능하면 channels 묶음(skip selection)으로 1개 규칙으로 줄이고,
+        # 조건이 섞여있으면 케이스별로 생성합니다.
+        try:
+            oid = self.create_skip_override_for_selection(project_id, preset_id, cases, priority=priority)
+            ids.append(oid)
+        except Exception:
+            for c in cases:
+                ids.append(self.create_skip_override_for_case(project_id, preset_id, c, priority=priority))
+        return ids
+
+    def enable_selected_cases(
+        self,
+        preset_id: str,
+        cases: List[TestCase],
+    ) -> int:
+        """
+        선택된 케이스를 다시 '활성화(Enable)' 합니다.
+
+        구현 방식:
+        - preset_id에 연결된 overrides 중 action='skip'이며
+          match가 선택된 케이스(또는 channels 포함 규칙)에 매칭되는 rule을 찾아 enabled=False로 변경
+        - hard delete 대신 enabled 플래그를 끄는 이유:
+          나중에 어떤 케이스를 왜 제외했는지 추적(Traceability) 하기 위해.
+
+        반환: 비활성화(disable)된 override 개수
+        """
+        if not cases:
+            return 0
+
+        # 선택 케이스를 빠르게 매칭하기 위한 key set
+        case_keys = {(c.band, c.standard, c.test_type, c.channel, c.bw_mhz) for c in cases}
+
+        rows = self.repo.list_overrides(preset_id)
+        hit = 0
+        for r in rows:
+            j = r.get("json_data") or {}
+            if j.get("action") != "skip":
+                continue
+            m = (j.get("match") or {})
+            band = m.get("band")
+            std = m.get("standard")
+            tt = m.get("test_type")
+            bw = m.get("bw_mhz")
+
+            # 1) 단일 channel 매칭
+            ch = m.get("channel")
+            if ch is not None:
+                if (band, std, tt, int(ch), int(bw)) in case_keys:
+                    self.repo.update_override_enabled(r["override_id"], False)
+                    hit += 1
+                continue
+
+            # 2) channels 리스트 매칭(그룹 skip)
+            chs = m.get("channels")
+            if chs:
+                for ch2 in chs:
+                    if (band, std, tt, int(ch2), int(bw)) in case_keys:
+                        self.repo.update_override_enabled(r["override_id"], False)
+                        hit += 1
+                        break
+        return hit
+
     def create_rerun_preset_from_fail(self, project_id: str, base_preset_id: str, run_id: str) -> str:
         base = self.repo.load_preset(base_preset_id)
         failed = self.run_repo.get_failed_cases(project_id, run_id)
@@ -437,28 +548,74 @@ class PlanService:
             description=migrated.get("description", ""),
     )
         
-    def validate_preset_against_ruleset(self, preset: Preset, ruleset: RuleSet) -> None:
-        sel = preset.selection
+    def validate_preset_against_ruleset(self, preset, ruleset) -> None:
+        """
+        preset.selection 과 ruleset 내용을 비교해서
+        - band 존재 여부
+        - standard 지원 여부
+        - test_types 지원 여부
+        등을 검증한다.
+
+        ✅ ruleset이 dict 기반이든, 객체(dataclass) 기반이든 모두 동작하도록 방어적으로 작성.
+        """
+        sel = preset.selection or {}
+
         band = sel.get("band")
         standard = sel.get("standard")
         test_types = sel.get("test_types", [])
         channels = sel.get("channels", {})
 
-        if band not in ruleset.bands:
-            raise ValueError(f"Band '{band}' is not defined in RuleSet. Available: {list(ruleset.bands.keys())}")
+        if not band:
+            raise ValueError("Preset selection is missing 'band'.")
+        if not standard:
+            raise ValueError("Preset selection is missing 'standard'.")
+        if not isinstance(test_types, list) or not test_types:
+            raise ValueError("Preset selection 'test_types' must be a non-empty list.")
 
-        band_info = ruleset.bands[band]
+        # --- ruleset.bands 가져오기 (dict/object 모두 지원) ---
+        bands = getattr(ruleset, "bands", None)
+        if bands is None:
+            # ruleset 자체가 dict일 수도 있음
+            if isinstance(ruleset, dict):
+                bands = ruleset.get("bands", {})
+            else:
+                raise ValueError("Invalid ruleset: missing 'bands'")
 
-        if standard not in band_info.standards:
-            raise ValueError(f"Standard '{standard}' not supported in band '{band}'. Supported: {band_info.standards}")
+        if band not in bands:
+            # dict일 수도 있고 object일 수도 있으니 keys()를 안전하게
+            try:
+                available = list(bands.keys())
+            except Exception:
+                available = []
+            raise ValueError(f"Band '{band}' is not defined in RuleSet. Available: {available}")
 
-        unsupported = [t for t in test_types if t not in band_info.tests_supported]
+        band_info = bands[band]
+
+        # --- band_info에서 standards/tests_supported 추출 (dict/object 모두 지원) ---
+        if isinstance(band_info, dict):
+            supported_standards = band_info.get("standards", [])
+            supported_tests = band_info.get("tests_supported", [])
+        else:
+            supported_standards = getattr(band_info, "standards", [])
+            supported_tests = getattr(band_info, "tests_supported", [])
+
+        if standard not in supported_standards:
+            raise ValueError(
+                f"Standard '{standard}' not supported in band '{band}'. "
+                f"Supported: {supported_standards}"
+            )
+
+        unsupported = [t for t in test_types if t not in supported_tests]
         if unsupported:
-            raise ValueError(f"Unsupported test_types in band '{band}': {unsupported}. Supported: {band_info.tests_supported}")
+            raise ValueError(
+                f"Unsupported test_types in band '{band}': {unsupported}. "
+                f"Supported: {supported_tests}"
+            )
 
-        # channels policy 최소 체크
-        policy = channels.get("policy")
-        if policy == "CUSTOM_LIST":
-            ch_list = channels.get("channels", [])
-            if not ch_list:
-                raise ValueError("channels.policy is CUSTOM_LIST but channels.channels is empty.")    
+        # --- channels 최소 검증 (policy만) ---
+        if isinstance(channels, dict):
+            policy = channels.get("policy")
+            if policy == "CUSTOM_LIST":
+                ch_list = channels.get("channels", [])
+                if not ch_list:
+                    raise ValueError("channels.policy is CUSTOM_LIST but channels.channels is empty.")

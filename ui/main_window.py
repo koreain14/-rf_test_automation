@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QAction, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
+    QComboBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QCheckBox,
     QSplitter, QToolBar, QTreeView, QTableView, QVBoxLayout, QWidget, QTabWidget, QListWidget, QLineEdit
 )
 
@@ -97,17 +97,24 @@ class MainWindow(QMainWindow):
         self.btn_add_plan = QPushButton("Add Plan")
         self.btn_reload = QPushButton("Reload Plan")
         self.btn_more = QPushButton("Load More")
-        self.btn_skip = QPushButton("Skip Selected")
+        self.btn_disable = QPushButton("Disable Selected")
+        self.btn_enable = QPushButton("Enable Selected")
+        self.chk_show_disabled = QCheckBox("Show Disabled")
+        self.chk_show_disabled.setChecked(False)
 
         toolbar.addSeparator()
         toolbar.addWidget(self.btn_add_plan)
         toolbar.addWidget(self.btn_more)
-        toolbar.addWidget(self.btn_skip)
+        toolbar.addWidget(self.btn_disable)
+        toolbar.addWidget(self.btn_enable)
+        toolbar.addWidget(self.chk_show_disabled)
         toolbar.addWidget(self.btn_reload)
 
         self.btn_add_plan.clicked.connect(self.on_add_plan)
         self.btn_more.clicked.connect(self.on_load_more)
-        self.btn_skip.clicked.connect(self.on_skip_selected)
+        self.btn_disable.clicked.connect(self.on_disable_selected)
+        self.btn_enable.clicked.connect(self.on_enable_selected)
+        self.chk_show_disabled.stateChanged.connect(lambda _s: self.on_reload_plan())
         self.btn_reload.clicked.connect(self.on_reload_plan)
 
         self.project_combo.currentIndexChanged.connect(self.on_project_changed)
@@ -343,7 +350,8 @@ class MainWindow(QMainWindow):
             overrides=ctx.overrides,
             filter_=self._current_filter,
             offset=self._current_offset,
-            limit=self.PAGE_SIZE
+            limit=self.PAGE_SIZE,
+            show_disabled=self.chk_show_disabled.isChecked() if hasattr(self, 'chk_show_disabled') else False,
         )
         self.case_model.append_rows(rows)
         self._current_offset += len(rows)
@@ -354,7 +362,14 @@ class MainWindow(QMainWindow):
     def on_load_more(self):
         self._load_page()
 
-    def on_skip_selected(self):
+    def on_disable_selected(self):
+        """Scenario Plan에서 선택한 케이스를 'Disable' 처리합니다.
+
+        구현:
+        - preset_id에 연결된 overrides에 action='skip' 규칙을 추가합니다.
+        - 이 규칙이 적용되면 기본적으로 해당 케이스는 Plan 목록에서 사라집니다.
+        - 'Show Disabled' 체크 시, disabled 케이스도 tags['_disabled']=True로 표시되어 다시 보입니다.
+        """
         if not self._current_plan_node_id:
             return
         ctx = self._plans[self._current_plan_node_id]
@@ -366,24 +381,49 @@ class MainWindow(QMainWindow):
             if c:
                 cases.append(c)
 
-        try:
-            self.svc.create_skip_override_for_selection(
-                project_id=ctx.project_id,
-                preset_id=ctx.preset_id,
-                cases=cases,
-                priority=100
-            )
-            QMessageBox.information(self, "Override created", f"Created 1 grouped skip override for {len(cases)} cases.")
-        except Exception as e:
-            # fallback: 기존 방식(개별 생성)
-            created = 0
-            for c in cases:
-                self.svc.create_skip_override_for_case(ctx.project_id, ctx.preset_id, c, priority=100)
-                created += 1
-            QMessageBox.warning(self, "Grouped skip failed",
-                                f"{e}\n\nFallback: created {created} individual overrides.")
+        if not cases:
+            QMessageBox.information(self, "No selection", "Select one or more cases to disable.")
+            return
+
+        created_ids = self.svc.disable_selected_cases(
+            project_id=ctx.project_id,
+            preset_id=ctx.preset_id,
+            cases=cases,
+            priority=100,
+        )
+        QMessageBox.information(self, "Disabled", f"Disabled {len(cases)} cases (overrides created: {len(created_ids)}).")
         self.on_reload_plan()
-        
+
+    def on_enable_selected(self):
+        """Scenario Plan에서 선택한 케이스를 다시 'Enable' 처리합니다.
+
+        주의:
+        - Disable된 케이스는 기본 목록에 보이지 않으므로,
+          'Show Disabled'를 켠 뒤 OFF 행을 선택하고 Enable 하는 흐름을 권장합니다.
+        """
+        if not self._current_plan_node_id:
+            return
+        ctx = self._plans[self._current_plan_node_id]
+
+        sel = self.table.selectionModel().selectedRows()
+        cases = []
+        for idx in sel:
+            c = self.case_model.get_case(idx.row())
+            if c:
+                cases.append(c)
+
+        if not cases:
+            QMessageBox.information(self, "No selection", "Select one or more cases to enable.")
+            return
+
+        hit = self.svc.enable_selected_cases(
+            preset_id=ctx.preset_id,
+            cases=cases,
+        )
+        QMessageBox.information(self, "Enabled", f"Enabled cases. Overrides disabled: {hit}")
+        self.on_reload_plan()
+
+
     def on_start_run(self):
         if not self._current_plan_node_id:
             QMessageBox.information(self, "No plan", "Add a plan and select it in the tree first.")
@@ -418,7 +458,7 @@ class MainWindow(QMainWindow):
 
         if final_status == "ERROR":
             self.lbl_status.setText(f"ERROR {run_id[:8]}")
-            QMessageBox.critical(self, "Run ERROR", error_text or "Unknown error")
+            QMessageBox.critical(self, "Run ERROR", error_text or "No traceback captured")
             return
 
         self.lbl_status.setText(f"{final_status} {run_id[:8]}")
@@ -582,6 +622,7 @@ class RunWorker(QThread):
     def run(self):
         import traceback
         self._error_text = ""
+        final_status = "ERROR"
 
         try:
             def should_stop():
