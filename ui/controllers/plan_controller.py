@@ -94,8 +94,20 @@ class PlanController:
         if not ctx:
             self.clear_cases_view()
             return
-        self._ensure_cases_loaded(ctx, force=True)
-        self.load_page()
+
+        # Reload should remain cache/query-driven. Do not force full hydration of
+        # ctx.all_cases here; instead invalidate the repo-backed cache so the next
+        # query reseeds from iter_cases(...) and refreshes the UI through the
+        # normal query path.
+        self._query_service.invalidate_context_cache(
+            ctx=ctx,
+            reset_case_order=True,
+            clear_hydrated_cases=True,
+        )
+        self._current_page = 1
+        self.refresh_plan_tree_order_only(self.current_plan_id())
+        self.load_group_summary()
+        self.load_detail_page(page=1)
 
     def _ensure_cases_loaded(self, ctx: Optional[PlanContext] = None, force: bool = False) -> None:
         ctx = ctx or self._current_context()

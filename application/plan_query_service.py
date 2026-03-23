@@ -80,6 +80,14 @@ class PlanQueryService:
             counts[test_type] = counts.get(test_type, 0) + int(getattr(row, "total_count", 0) or 0)
         return counts
 
+
+    def invalidate_context_cache(self, *, ctx: Any, reset_case_order: bool = False, clear_hydrated_cases: bool = True) -> None:
+        self._engine.invalidate_context_cache(
+            ctx=ctx,
+            reset_case_order=reset_case_order,
+            clear_hydrated_cases=clear_hydrated_cases,
+        )
+
     def _ensure_context_cases(self, ctx: Any) -> None:
         """Compatibility bridge for existing controller call sites."""
         self._engine._ensure_context_cases(ctx)

@@ -157,6 +157,38 @@ class PlanQueryEngine:
         setattr(ctx, "_cache_state_token", state_token)
         return cache_key
 
+
+    def invalidate_context_cache(self, *, ctx: Any, reset_case_order: bool = False, clear_hydrated_cases: bool = True) -> None:
+        """
+        Invalidate the repo-backed cache for a context without forcing full TestCase hydration.
+
+        Intended for reload/refresh flows where we want the next query to reseed
+        ``plan_case_cache`` from ``iter_cases(...)`` and refresh the UI via the
+        normal query path. This keeps reload cache/query-driven instead of
+        forcing ``ctx.all_cases`` as the default source.
+        """
+        if ctx is None:
+            return
+        repo = getattr(self.plan_service, "repo", None)
+        cache_key = getattr(ctx, "_cache_key", None)
+        if repo is not None and cache_key:
+            try:
+                repo.clear_plan_case_cache(cache_key=cache_key)
+            except Exception:
+                log.exception("plan_query_engine.invalidate_context_cache | clear_cache_failed cache_key=%s", cache_key)
+        if hasattr(ctx, "_cache_state_token"):
+            setattr(ctx, "_cache_state_token", None)
+        if reset_case_order:
+            try:
+                ctx.case_order = []
+            except Exception:
+                pass
+        if clear_hydrated_cases:
+            try:
+                ctx.all_cases = []
+            except Exception:
+                pass
+
     def _build_context_state_token(self, *, ctx: Any) -> tuple[Any, ...]:
         """
         Build a cache synchronization token without depending on ctx.all_cases.

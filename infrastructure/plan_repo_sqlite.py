@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from .db import ensure_plan_case_cache_schema, get_connection
+from .db import get_connection, _ensure_plan_case_cache_columns
 
 
 def now() -> str:
@@ -21,6 +21,16 @@ PLAN_CASE_CACHE_INSERT_SQL = f"""
             ) VALUES ({', '.join(['?'] * len(PLAN_CASE_CACHE_COLUMNS))})
             """
 
+
+
+
+def _ensure_plan_case_cache_schema(cur) -> None:
+    """Runtime self-heal for plan_case_cache schema.
+
+    Startup migration should normally handle this, but write-path schema ensure
+    prevents old DB files or partial startup paths from causing regressions.
+    """
+    _ensure_plan_case_cache_columns(cur)
 
 def _plan_case_cache_tuple(cache_key: str, project_id: str, preset_id: str, r: Dict[str, Any]) -> tuple:
     row = (
@@ -48,12 +58,6 @@ def _plan_case_cache_tuple(cache_key: str, project_id: str, preset_id: str, r: D
     if len(row) != len(PLAN_CASE_CACHE_COLUMNS):
         raise ValueError(f"plan_case_cache tuple mismatch: expected {len(PLAN_CASE_CACHE_COLUMNS)}, got {len(row)}")
     return row
-
-
-
-def _ensure_plan_case_cache_ready(cur) -> None:
-    """Runtime self-heal for legacy DB files that missed startup migration."""
-    ensure_plan_case_cache_schema(cur=cur)
 
 class PlanRepositorySQLite:
     def create_project(self, name: str, description: str = "") -> str:
@@ -215,7 +219,7 @@ class PlanRepositorySQLite:
     def clear_plan_case_cache(self, cache_key: str) -> None:
         conn = get_connection()
         cur = conn.cursor()
-        _ensure_plan_case_cache_ready(cur)
+        _ensure_plan_case_cache_schema(cur)
         cur.execute("DELETE FROM plan_case_cache WHERE cache_key = ?", (cache_key,))
         conn.commit()
         conn.close()
@@ -223,18 +227,48 @@ class PlanRepositorySQLite:
     def sync_plan_case_cache(self, cache_key: str, project_id: str, preset_id: str, rows: List[Dict[str, Any]]) -> None:
         conn = get_connection()
         cur = conn.cursor()
-        _ensure_plan_case_cache_ready(cur)
+        _ensure_plan_case_cache_schema(cur)
         cur.execute("DELETE FROM plan_case_cache WHERE cache_key = ?", (cache_key,))
-        batch = [_plan_case_cache_tuple(cache_key=cache_key, project_id=project_id, preset_id=preset_id, r=r) for r in rows]
-        if batch:
-            cur.executemany(PLAN_CASE_CACHE_INSERT_SQL, batch)
+        cur.executemany(
+            """
+            INSERT INTO plan_case_cache (
+              cache_key, project_id, preset_id, case_key, band, standard, phy_mode, mode,
+              bandwidth_mhz, bw_mhz, channel, frequency_mhz, center_freq_mhz, test_type,
+              tech, regulation, group_name, enabled, excluded, deleted, priority_tag, sort_index
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    cache_key, project_id, preset_id,
+                    str(r.get("case_key") or r.get("id") or r.get("key") or ""),
+                    str(r.get("band", "") or ""),
+                    str(r.get("standard", "") or ""),
+                    str(r.get("phy_mode", "") or ""),
+                    str(r.get("mode", r.get("phy_mode", "")) or ""),
+                    int(r.get("bandwidth_mhz", r.get("bw_mhz", 0)) or 0),
+                    int(r.get("bw_mhz", r.get("bandwidth_mhz", 0)) or 0),
+                    int(r.get("channel", 0) or 0),
+                    float(r.get("frequency_mhz", r.get("center_freq_mhz", 0)) or 0),
+                    float(r.get("center_freq_mhz", r.get("frequency_mhz", 0)) or 0),
+                    str(r.get("test_type", "") or ""),
+                    str(r.get("tech", "") or ""),
+                    str(r.get("regulation", "") or ""),
+                    str(r.get("group_name", r.get("group", "")) or ""),
+                    1 if bool(r.get("enabled", True)) else 0,
+                    1 if bool(r.get("excluded", False)) else 0,
+                    1 if bool(r.get("deleted", False)) else 0,
+                    str(r.get("priority_tag", "") or ""),
+                    int(r.get("sort_index", 0) or 0),
+                ) for r in rows
+            ]
+        )
         conn.commit()
         conn.close()
 
     def rebuild_plan_case_cache_from_iterable(self, *, cache_key: str, project_id: str, preset_id: str, rows) -> None:
         conn = get_connection()
         cur = conn.cursor()
-        _ensure_plan_case_cache_ready(cur)
+        _ensure_plan_case_cache_schema(cur)
         cur.execute("DELETE FROM plan_case_cache WHERE cache_key = ?", (cache_key,))
         batch = []
         for r in rows:
@@ -252,7 +286,6 @@ class PlanRepositorySQLite:
     def count_plan_case_cache_rows(self, *, cache_key: str) -> int:
         conn = get_connection()
         cur = conn.cursor()
-        _ensure_plan_case_cache_ready(cur)
         cur.execute("SELECT COUNT(*) AS cnt FROM plan_case_cache WHERE cache_key = ?", (cache_key,))
         row = cur.fetchone()
         conn.close()
@@ -261,7 +294,7 @@ class PlanRepositorySQLite:
     def list_plan_case_cache_rows(self, *, cache_key: str) -> List[Dict[str, Any]]:
         conn = get_connection()
         cur = conn.cursor()
-        _ensure_plan_case_cache_ready(cur)
+        _ensure_plan_case_cache_schema(cur)
         cur.execute(
             """
             SELECT case_key,
@@ -368,7 +401,6 @@ class PlanRepositorySQLite:
     def query_plan_case_group_summary(self, cache_key: str, plan_filter: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
         conn = get_connection()
         cur = conn.cursor()
-        _ensure_plan_case_cache_ready(cur)
         clauses, params = self._build_plan_case_cache_where(plan_filter)
         sql = "SELECT band, standard, bandwidth_mhz, test_type, COUNT(*) AS total_count, SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) AS enabled_count, SUM(CASE WHEN enabled = 0 THEN 1 ELSE 0 END) AS disabled_count FROM plan_case_cache WHERE cache_key = ? AND deleted = 0"
         params = [cache_key] + params
@@ -383,7 +415,6 @@ class PlanRepositorySQLite:
     def query_plan_case_count(self, cache_key: str, plan_filter: Dict[str, Any] | None = None) -> int:
         conn = get_connection()
         cur = conn.cursor()
-        _ensure_plan_case_cache_ready(cur)
         clauses, params = self._build_plan_case_cache_where(plan_filter)
         sql = "SELECT COUNT(*) AS cnt FROM plan_case_cache WHERE cache_key = ? AND deleted = 0"
         params = [cache_key] + params
@@ -397,7 +428,6 @@ class PlanRepositorySQLite:
     def query_plan_case_detail_page(self, cache_key: str, plan_filter: Dict[str, Any] | None = None, order_by: str = "sort_index ASC", offset: int = 0, limit: int = 200) -> List[Dict[str, Any]]:
         conn = get_connection()
         cur = conn.cursor()
-        _ensure_plan_case_cache_ready(cur)
         clauses, params = self._build_plan_case_cache_where(plan_filter)
         sql = "SELECT case_key, case_key AS id, case_key AS key, band, standard, phy_mode, mode, bandwidth_mhz, bw_mhz, channel, frequency_mhz, center_freq_mhz, test_type, tech, regulation, group_name, enabled, excluded, deleted, priority_tag, sort_index FROM plan_case_cache WHERE cache_key = ? AND deleted = 0"
         params = [cache_key] + params
@@ -413,7 +443,6 @@ class PlanRepositorySQLite:
     def query_plan_case_runnable_keys(self, cache_key: str, plan_filter: Dict[str, Any] | None = None, order_by: str = "sort_index ASC") -> List[str]:
         conn = get_connection()
         cur = conn.cursor()
-        _ensure_plan_case_cache_ready(cur)
         clauses, params = self._build_plan_case_cache_where(plan_filter)
         sql = "SELECT case_key FROM plan_case_cache WHERE cache_key = ? AND deleted = 0 AND excluded = 0 AND enabled = 1"
         params = [cache_key] + params
